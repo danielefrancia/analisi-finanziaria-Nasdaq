@@ -131,7 +131,9 @@ elif tipo_analisi == "🔄 Modello Opzioni, Stop-Loss & Rischio":
                     # Target Classificazione Opzioni (Orizzonte 7 giorni)
                     rendimento_futuro_7g = (df['Close'].shift(-7) - df['Close']) / df['Close']
                     condizioni = [(rendimento_futuro_7g >= 0.04), (rendimento_futuro_7g <= -0.03)]
-                    df['Target_Class'] = np.select(condizioni, choicelist=[2, 1], default=0)
+                    
+                    # Uso sintassi argomenti posizionali per evitare incompatibilità di NumPy
+                    df['Target_Class'] = np.select(condizioni, [2, 1], default=0)
                     
                     # Target Regressione Prezzi Giornalieri (t+1 a t+5)
                     for i in range(1, 6):
