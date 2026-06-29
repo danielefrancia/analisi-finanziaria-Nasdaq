@@ -102,3 +102,136 @@ elif tipo_analisi == "🔄 Modello Opzioni, Stop-Loss & Rischio":
             try:
                 # 1. Download e pulizia dati (3 anni per garantire stabilità al Machine Learning)
                 df = yf.Ticker(ticker_input).history(period="3y", auto_adjust=True)
+                
+                if not df.empty and len(df) > 50:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.droplevel(1)
+                    
+                    # Calcolo RSI (14 periodi)
+                    delta = df['Close'].diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                    rs = gain / (loss + 1e-10)
+                    df['RSI'] = 100 - (100 / (1 + rs))
+                    
+                    # Calcolo Bande di Bollinger (20 periodi, 2 deviazioni standard)
+                    df['MA20'] = df['Close'].rolling(window=20).mean()
+                    df['STD20'] = df['Close'].rolling(window=20).std()
+                    df['Bollinger_Upper'] = df['MA20'] + (2 * df['STD20'])
+                    df['Bollinger_Lower'] = df['MA20'] - (2 * df['STD20'])
+                    
+                    df['Distanza_Banda_Sup'] = (df['Close'] - df['Bollinger_Upper']) / df['Bollinger_Upper']
+                    df['Distanza_Banda_Inf'] = (df['Close'] - df['Bollinger_Lower']) / df['Bollinger_Lower']
+                    
+                    # Calcolo Volumi Standardizzati (Z-Score)
+                    df['Vol_Media20'] = df['Volume'].rolling(window=20).mean()
+                    df['Vol_STD20'] = df['Volume'].rolling(window=20).std()
+                    df['Volumi_Standardizzati'] = (df['Volume'] - df['Vol_Media20']) / (df['Vol_STD20'] + 1e-10)
+                    
+                    # Target Classificazione Opzioni (Orizzonte 7 giorni)
+                    rendimento_futuro_7g = (df['Close'].shift(-7) - df['Close']) / df['Close']
+                    condizioni = [(rendimento_futuro_7g >= 0.04), (rendimento_futuro_7g <= -0.03)]
+                    df['Target_Class'] = np.select(condizioni, choicelist=[2, 1], default=0)
+                    
+                    # Target Regressione Prezzi Giornalieri (t+1 a t+5)
+                    for i in range(1, 6):
+                        df[f'Target_Price_t+{i}'] = df['Close'].shift(-i)
+                    
+                    # Estrazione ultimo stato reale prima di ripulire i NaN per il training
+                    ultimo_stato = df.dropna(subset=['RSI', 'Bollinger_Upper', 'Volumi_Standardizzati']).iloc[-1].copy()
+                    df_train = df.dropna().copy()
+                    
+                    # Caricamento delle Feature
+                    features = ['RSI', 'Distanza_Banda_Sup', 'Distanza_Banda_Inf', 'Volumi_Standardizzati']
+                    X = df_train[features]
+                    y_class = df_train['Target_Class']
+                    
+                    # 2. Train Ensemble Classificazione (Walk-Forward Validation)
+                    split = int(len(df_train) * 0.8)
+                    modello_rf1 = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+                    modello_rf2 = RandomForestClassifier(n_estimators=150, min_samples_leaf=4, random_state=2026)
+                    
+                    modello_rf1.fit(X.iloc[:split], y_class.iloc[:split])
+                    modello_rf2.fit(X.iloc[:split], y_class.iloc[:split])
+                    accuratezza = modello_rf1.score(X.iloc[split:], y_class.iloc[split:])
+                    
+                    # Predizione Scenari
+                    vettore_input = np.array([ultimo_stato[features].values])
+                    prob1 = modello_rf1.predict_proba(vettore_input)[0]
+                    prob2 = modello_rf2.predict_proba(vettore_input)[0]
+                    probabilita_array = (prob1 + prob2) / 2
+                    
+                    classi_modello = list(modello_rf1.classes_)
+                    prob_laterale = probabilita_array[classi_modello.index(0)] if 0 in classi_modello else 0.0
+                    prob_stop_loss = probabilita_array[classi_modello.index(1)] if 1 in classi_modello else 0.0
+                    prob_take_profit = probabilita_array[classi_modello.index(2)] if 2 in classi_modello else 0.0
+                    
+                    # 3. Train Modello di Regressione Prezzi
+                    previsioni_prezzo = []
+                    for i in range(1, 6):
+                        y_reg = df_train[f'Target_Price_t+{i}']
+                        modello_reg = LinearRegression()
+                        modello_reg.fit(X, y_reg)
+                        previsioni_prezzo.append(modello_reg.predict(vettore_input)[0])
+                    
+                    # --- INTERFACCIA GRAFICA ---
+                    prezzo_attuale = ultimo_stato['Close']
+                    st.write(f"### Analisi Predittiva del Rischio per {ticker_input} (Orizzonte 7 Giorni)")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("#### 📈 Indicatori di Mercato Calcolati")
+                        st.markdown(f"""
+                            <div class="metric-box">
+                                <b>Prezzo Attuale:</b> ${prezzo_attuale:.2f}<br>
+                                <b>RSI (14 periodi):</b> <span style="color:#3b82f6; font-weight:bold;">{ultimo_stato['RSI']:.2f}</span><br>
+                                <b>Banda BB Superiore:</b> ${ultimo_stato['Bollinger_Upper']:.2f}<br>
+                                <b>Banda BB Inferiore (Supporto):</b> ${ultimo_stato['Bollinger_Lower']:.2f}<br>
+                                <b>Z-Score Volumi:</b> {ultimo_stato['Volumi_Standardizzati']:.2f}
+                            </div>
+                        """, unsafe_allow_html=True)
+                        
+                    with col2:
+                        st.markdown("#### 🎯 Distribuzione delle Probabilità (Ensemble Model)")
+                        st.markdown(f"""
+                            <div class="metric-box">
+                                <b>Accuratezza Backtest:</b> {accuratezza:.2%}<br>
+                                <span style="color:#10b981; font-weight:bold;">🚀 Take Profit (≥ +4%):</span> {prob_take_profit:.1%}<br>
+                                <span style="color:#3b82f6; font-weight:bold;">↔️ Scenario Laterale:</span> {prob_laterale:.1%}<br>
+                                <span style="color:#ef4444; font-weight:bold;">⚠️ Stop Loss (≤ -3%):</span> {prob_stop_loss:.1%}
+                            </div>
+                        """, unsafe_allow_html=True)
+                    
+                    # --- 4. PREVISIONE PREZZI GIORNALIERI ---
+                    st.write("---")
+                    st.subheader("📅 Previsione del Prezzo Target nei Prossimi Giorni")
+                    st.write("Prezzi puntuali attesi calcolati tramite regressione adattiva basata sulle metriche correnti.")
+                    
+                    # Generazione date escludendo weekend
+                    giorni_settimana = []
+                    data_corrente = datetime.now()
+                    passo = 1
+                    while len(giorni_settimana) < 5:
+                        giorno_futuro = data_corrente + timedelta(days=passo)
+                        if giorno_futuro.weekday() < 5:
+                            giorni_settimana.append(giorno_futuro.strftime('%A (%d/%m)'))
+                        passo += 1
+                    
+                    df_previsioni = pd.DataFrame({
+                        'Giorno Previsto': giorni_settimana,
+                        'Prezzo Target': [f"${p:.2f}" for p in previsioni_prezzo],
+                        'Variazione Attesa': [f"{((p - prezzo_attuale) / prezzo_attuale):+.2%}" for p in previsioni_prezzo]
+                    })
+                    
+                    c_tab, c_graf = st.columns([1, 1])
+                    with c_tab:
+                        st.dataframe(df_previsioni, use_container_width=True, hide_index=True)
+                    with c_graf:
+                        df_chart = pd.DataFrame({'Prezzo Target': previsioni_prezzo}, index=giorni_settimana)
+                        st.line_chart(df_chart)
+                        
+                    st.success("Analisi statistica e forecast completati con successo.")
+                else:
+                    st.error("Dati insufficienti su Yahoo Finance per elaborare gli indicatori di questo ticker.")
+            except Exception as e:
+                st.error(f"Errore durante l'elaborazione dell'analisi tecnica: {str(e)}")
