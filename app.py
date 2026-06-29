@@ -16,11 +16,11 @@ def calcola_modello_avanzato(ticker_symbol):
         # Forziamo il ticker pulito ed in maiuscolo
         ticker_clean = str(ticker_symbol).strip().upper()
         
-        # Scarichiamo 3 anni di dati giornalieri
-        df = yf.Ticker(ticker_clean).history(period="3y")
+        # Scarichiamo 3 anni di dati giornalieri con auto_adjust abilitato
+        df = yf.Ticker(ticker_clean).history(period="3y", auto_adjust=True)
         if df.empty:
             return None, None
-        
+            
         # Ripuliamo l'eventuale multi-index introdotto dalle nuove versioni di yfinance
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
@@ -66,7 +66,7 @@ def calcola_modello_avanzato(ticker_symbol):
         
         return df_train, ultimo_disponibile
     except Exception as e:
-        st.error(f"Errore nel calcolo: {e}")
+        st.error(f"Errore nel calcolo per il ticker {ticker_symbol}: {e}")
         return None, None
 
 # --- 2. INTERFACCIA UTENTE (SIDEBAR) ---
@@ -103,7 +103,6 @@ else:
     with col1:
         st.markdown("### 📈 Indicatori di Mercato Calcolati")
         
-        # Prezzo Attuale Reale estratto in sicurezza
         prezzo_attuale = ultimo_stato['Close']
         banda_inf = ultimo_stato['Bollinger_Lower']
         
@@ -114,14 +113,10 @@ else:
         st.write(f"**Banda Inferiore (Supporto):** ${banda_inf:.2f}")
         st.metric(label="Z-Score Volumi (Standardizzati)", value=f"{ultimo_stato['Volumi_Standardizzati']:.2f}")
         
-        st.write("---")
-        calcola = st.button("Calcola Probabilità di Scenario")
-        
     with col2:
         st.markdown("### 🎯 Probabilità Statistiche per Opzioni & Livelli")
         st.metric(label="Accuratezza Storica del Modello", value=f"{accuratezza:.2%}")
         
-        # Calcolo dinamico dei target basati sul prezzo attuale reale
         target_tp = prezzo_attuale * 1.04
         target_sl = prezzo_attuale * 0.97
         
@@ -131,35 +126,35 @@ else:
         with col_metrics_2:
             st.metric(label="Stop-Loss Rigido (Protezione -3%)", value=f"${target_sl:.2f}")
             
-        if calcola:
-            # Estraiamo solo i valori delle feature nell'ordine corretto
-            vettore_input = np.array([ultimo_stato[features].values])
-            probabilita = modello.predict_proba(vettore_input)[0]
-            
-            prob_laterale = probabilita[0]  # Classe 0
-            prob_stop_loss = probabilita[1]  # Classe 1 (-3%)
-            prob_take_profit = probabilita[2] # Classe 2 (+4%)
-            
-            st.write("---")
-            st.markdown("#### Distribuzione delle Probabilità nei prossimi 7 giorni:")
-            
-            col_tp, col_sideways, col_sl = st.columns(3)
-            with col_tp:
-                st.success(f"🚀 **Take Profit (≥ +4%):** \n\n **{prob_take_profit:.1%}**")
-            with col_sideways:
-                st.info(f"↔️ **Laterale (Canale):** \n\n **{prob_laterale:.1%}**")
-            with col_sl:
-                st.warning(f"⚠️ **Stop Loss (≤ -3%):** \n\n **{prob_stop_loss:.1%}**")
-            
-            # Grafico a barre orizzontale
-            chart_data = pd.DataFrame({
-                'Scenario': ['Stop Loss (≤ -3%)', 'Laterale (Canale)', 'Take Profit (≥ +4%)'],
-                'Probabilità': [prob_stop_loss, prob_laterale, prob_take_profit]
-            })
-            st.bar_chart(data=chart_data, x='Scenario', y='Probabilità', use_container_width=True)
-            
-            st.markdown("#### Prezzo Storico Ultimi 100 Giorni")
-            # Usiamo df_mercato per mostrare lo storico completo senza buchi
-            st.line_chart(df_mercato['Close'].tail(100))
-        else:
-            st.info("Clicca sul pulsante per elaborare gli indicatori reali ed estrarre le probabilità matematiche.")
+        # Calcolo istantaneo e sicuro delle probabilità senza reset da bottone
+        vettore_input = np.array([ultimo_stato[features].values])
+        probabilita_array = modello.predict_proba(vettore_input)[0]
+        
+        # Mapping sicuro basato sulle classi effettivamente apprese dal modello
+        classi_modello = list(modello.classes_)
+        prob_laterale = probabilita_array[classi_modello.index(0)] if 0 in classi_modello else 0.0
+        prob_stop_loss = probabilita_array[classi_modello.index(1)] if 1 in classi_modello else 0.0
+        prob_take_profit = probabilita_array[classi_modello.index(2)] if 2 in classi_modello else 0.0
+        
+        st.write("---")
+        st.markdown("#### Distribuzione delle Probabilità nei prossimi 7 giorni:")
+        
+        col_tp, col_sideways, col_sl = st.columns(3)
+        with col_tp:
+            st.success(f"🚀 **Take Profit (≥ +4%):** \n\n **{prob_take_profit:.1%}**")
+        with col_sideways:
+            st.info(f"↔️ **Laterale (Canale):** \n\n **{prob_laterale:.1%}**")
+        with col_sl:
+            st.warning(f"⚠️ **Stop Loss (≤ -3%):** \n\n **{prob_stop_loss:.1%}**")
+        
+        # Grafico a barre orizzontale
+        chart_data = pd.DataFrame({
+            'Scenario': ['Stop Loss (≤ -3%)', 'Laterale (Canale)', 'Take Profit (≥ +4%)'],
+            'Probabilità': [prob_stop_loss, prob_laterale, prob_take_profit]
+        })
+        st.bar_chart(data=chart_data, x='Scenario', y='Probabilità', use_container_width=True)
+        
+        # Storico grafico arricchito con Bande di Bollinger
+        st.markdown("#### Prezzo Storico e Bande di Bollinger (Ultimi 100 Giorni)")
+        df_recent = df_mercato.tail(100)[['Close', 'Bollinger_Upper', 'Bollinger_Lower']]
+        st.line_chart(df_recent)
